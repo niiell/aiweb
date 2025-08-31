@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>AIWeb Starter</title>
+  <style>body{font-family:Arial,Helvetica,sans-serif;margin:20px}label{display:block;margin-bottom:8px}button{margin-top:8px}</style>
+</head>
+<body>
+  <h1>AIWeb Starter — Upload</h1>
+  <form id="uploadForm">
+    <label>Choose video/audio file
+      <input type="file" name="file" id="fileInput" required />
+    </label>
+
+    <div id="fileType" style="margin-bottom:8px;font-weight:600">Type: -</div>
+
+    <label>Merge mode
+      <select id="mergeMode" name="mergeMode">
+        <option value="replace">Replace audio</option>
+        <option value="mix">Mix audio</option>
+      </select>
+    </label>
+
+    <label>
+      <input type="checkbox" id="burnSubtitles" name="burnSubtitles" /> Burn subtitles into video
+    </label>
+
+    <label>
+      <input type="checkbox" id="enhance" name="enhance" /> Enhance audio (denoise) before ASR
+    </label>
+
+    <button type="submit">Upload</button>
+  </form>
+
+  <div id="status" style="margin-top:16px"></div>
+  <div id="results" style="margin-top:12px"></div>
+
+  <script>
+    const form = document.getElementById('uploadForm');
+    const status = document.getElementById('status');
+    const results = document.getElementById('results');
+    const fileInput = document.getElementById('fileInput');
+    const fileTypeEl = document.getElementById('fileType');
+
+    fileInput.addEventListener('change', () => {
+      const f = fileInput.files[0];
+      if (!f) { fileTypeEl.textContent = 'Type: -'; return; }
+      const t = f.type || '';
+      if (t.startsWith('video/')) fileTypeEl.textContent = 'Type: Video';
+      else if (t.startsWith('audio/')) fileTypeEl.textContent = 'Type: Audio';
+      else fileTypeEl.textContent = 'Type: Unknown';
+    });
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const file = document.getElementById('fileInput').files[0];
+      if (!file) return;
+      status.textContent = 'Uploading...';
+      results.innerHTML = '';
+
+      const fd = new FormData();
+      fd.append('file', file);
+      // include merge options
+      const mergeMode = document.getElementById('mergeMode').value;
+      const burn = document.getElementById('burnSubtitles').checked ? 'true' : 'false';
+      const enhance = document.getElementById('enhance').checked ? 'true' : 'false';
+      fd.append('mergeMode', mergeMode);
+      fd.append('burnSubtitles', burn);
+      fd.append('enhance', enhance);
+
+      const resp = await fetch('/upload', { method: 'POST', body: fd });
+      const body = await resp.json();
+      if (!resp.ok) {
+        status.textContent = 'Upload failed: ' + (body && body.error);
+        return;
+      }
+
+      const jobId = body.jobId;
+      status.textContent = `Job queued: ${jobId}`;
+
+      const poll = setInterval(async () => {
+        const r = await fetch(`/job/${jobId}`);
+        if (!r.ok) {
+          status.textContent = 'Job status error';
+          clearInterval(poll);
+          return;
+        }
+        const j = await r.json();
+        status.textContent = `State: ${j.state} — ${j.progress || 0}%`;
+        if (j.result) {
+          clearInterval(poll);
+          status.textContent = `Completed. Outputs:`;
+          results.innerHTML = '';
+          const res = j.result;
+          if (res.audio) results.appendChild(link(res.audio, 'Extracted audio'));
+          if (res.transcript) results.appendChild(link(res.transcript, 'Transcript'));
+          if (res.translated) results.appendChild(link(res.translated, 'Translated text'));
+          if (res.tts) results.appendChild(link(res.tts, 'TTS audio'));
+          if (res.dubbed) results.appendChild(link(res.dubbed, 'Dubbed video'));
+
+          // show merge skip/error files if present
+          const base = deriveBaseName(res);
+          if (base) {
+            const skipName = `${base}-merge.skip.txt`;
+            const errName = `${base}-merge.error.txt`;
+            await maybeAppendUploadLink(skipName, 'Merge skipped');
+            await maybeAppendUploadLink(errName, 'Merge error log');
+          }
+        }
+      }, 2000);
+    });
+
+    function deriveBaseName(res) {
+      // pick the best-known path to infer base (remove known suffixes)
+      const candidates = [res.transcript, res.audio, res.tts, res.translated, res.dubbed].filter(Boolean);
+      if (!candidates.length) return null;
+      const name = candidates[0].split('/').pop().split('\\').pop();
+      return name
+        .replace(/-transcript(?:\.txt)?$/,'')
+        .replace(/-audio(?:\.wav)?$/,'')
+        .replace(/-tts(?:\.mp3)?$/,'')
+        .replace(/-translated(?:\.txt)?$/,'')
+        .replace(/-dubbed(?:\.mp4)?$/,'');
+    }
+
+    async function maybeAppendUploadLink(filename, label) {
+      try {
+        const url = `/uploads/${encodeURIComponent(filename)}`;
+        const head = await fetch(url, { method: 'HEAD' });
+        if (head.ok) results.appendChild(link(url, label));
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    function link(filePath, label) {
+      const a = document.createElement('a');
+      // filePath may be a full path or URL; handle both
+      const raw = typeof filePath === 'string' ? filePath : '';
+      const filename = raw.split('/').pop().split('\\').pop();
+      a.href = raw.startsWith('/uploads/') ? raw : `/uploads/${encodeURIComponent(filename)}`;
+      a.textContent = label + ' — ' + filename;
+      a.style.display = 'block';
+      a.target = '_blank';
+      return a;
+    }
+  </script>
+</body>
+</html>

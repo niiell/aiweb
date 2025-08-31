@@ -1,0 +1,64 @@
+version: '3.8'
+services:
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    command: npm start
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    volumes:
+      - ./:/usr/src/app:rw
+      - ./uploads:/usr/src/app/uploads:rw
+    depends_on:
+      - redis
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=development
+      # Set paths to Docker secrets if provided
+      - OPENAI_API_KEY_FILE=/run/secrets/openai_api_key
+      - GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/google_credentials
+    secrets:
+      - openai_api_key
+      - google_credentials
+
+  worker:
+    build: .
+    command: npm run worker
+    env_file:
+      - .env
+    volumes:
+      - ./:/usr/src/app:rw
+      - ./uploads:/usr/src/app/uploads:rw
+    depends_on:
+      - redis
+    restart: unless-stopped
+    environment:
+      - OPENAI_API_KEY_FILE=/run/secrets/openai_api_key
+      - GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/google_credentials
+    secrets:
+      - openai_api_key
+      - google_credentials
+
+secrets:
+  openai_api_key:
+    file: ./secrets/openai_api_key
+  google_credentials:
+    file: ./secrets/google_credentials
+
+# Notes:
+# - Place sensitive files under ./secrets:
+#   - ./secrets/openai_api_key (plain API key, no newline preferred)
+#   - ./secrets/google_credentials (service account JSON)
+# - docker compose will mount them into containers at /run/secrets/<name>.
+# - On Windows with Docker Desktop use 'docker compose up --build' to start these services.
+# - .env is still read for non-secret settings; secrets take precedence via the FILE env vars above.
