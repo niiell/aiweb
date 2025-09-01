@@ -92,52 +92,48 @@ async function transcribeGoogle(filePath) {
     // 2) ffmpeg-static package
     // 3) system ffmpeg reachable in PATH
     const envFfmpeg = process.env.FFMPEG_PATH || process.env.FFMPEG;
-    if (envFfmpeg) {
-      ffmpeg.setFfmpegPath(envFfmpeg);
+
+    // Try to locate a usable ffmpeg executable from several candidates. If we find one,
+    // configure fluent-ffmpeg to use it. If not, surface a friendly, actionable error
+    // (only when fluent-ffmpeg itself is installed — if fluent-ffmpeg is not present
+    // we simply won't perform conversion).
+    const { spawnSync } = require('child_process');
+    let ffmpegStatic = null;
+    try {
+      ffmpegStatic = require('ffmpeg-static');
+    } catch (e) {
+      // ffmpeg-static not installed; that's fine — we'll try other candidates
+    }
+
+    const candidates = [];
+    if (envFfmpeg) candidates.push({ type: 'env', path: envFfmpeg });
+    if (ffmpegStatic) candidates.push({ type: 'static', path: ffmpegStatic });
+    // 'system' will attempt to call 'ffmpeg' on PATH
+    candidates.push({ type: 'system', path: 'ffmpeg' });
+
+    let detectedFfmpegPath = null;
+    for (const c of candidates) {
+      try {
+        const cmd = c.path === 'ffmpeg' ? 'ffmpeg' : c.path;
+        // On Windows using shell can help resolve file associations; on POSIX we avoid shell.
+        const res = spawnSync(cmd, ['-version'], { shell: process.platform === 'win32', encoding: 'utf8' });
+        if (res && (res.status === 0 || (res.stdout && res.stdout.toLowerCase().includes('ffmpeg version')))) {
+          detectedFfmpegPath = c.path === 'ffmpeg' ? 'ffmpeg' : c.path;
+          break;
+        }
+      } catch (e) {
+        // ignore and try next candidate
+      }
+    }
+
+    if (detectedFfmpegPath) {
+      // If we detected a specific path (env or static), set fluent-ffmpeg to use it.
+      if (detectedFfmpegPath !== 'ffmpeg') ffmpeg.setFfmpegPath(detectedFfmpegPath);
       useConversion = true;
     } else {
-      try {
-        const ffmpegStatic = require('ffmpeg-static');
-        if (ffmpegStatic) {
-          ffmpeg.setFfmpegPath(ffmpegStatic);
-          useConversion = true;
-        }
-      } catch (e) {
-        // ffmpeg-static not installed; fall through and test system ffmpeg
-      }
-    }
-
-    if (!useConversion) {
-      // Test whether system ffmpeg is callable. Use spawnSync with shell to work across platforms.
-      const { spawnSync } = require('child_process');
-      try {
-        const test = spawnSync('ffmpeg', ['-version'], { shell: true, encoding: 'utf8' });
-        if (test.status === 0 || (test.stdout && test.stdout.toLowerCase().includes('ffmpeg version'))) {
-          // system ffmpeg exists and is callable from PATH
-          useConversion = true;
-        }
-      } catch (e) {
-        // ignore and fall through to friendly error
-      }
-    }
-
-    if (useConversion) {
-      convertedPath = path.join(os.tmpdir(), `gcs_asr_${Date.now()}_${path.basename(filePath)}.wav`);
-      await new Promise((resolve, reject) => {
-        ffmpeg(filePath)
-          .noVideo()
-          .audioCodec('pcm_s16le')
-          .audioChannels(1)
-          .audioFrequency(16000)
-          .format('wav')
-          .on('end', resolve)
-          .on('error', (err) => reject(new Error('ffmpeg conversion failed: ' + err.message)))
-          .save(convertedPath);
-      });
-    } else {
-      // fluent-ffmpeg is installed but we couldn't find an ffmpeg binary. Provide a helpful error.
+      // fluent-ffmpeg is present but we couldn't find an ffmpeg binary. Provide a helpful error.
       const winNote = process.platform === 'win32'
-        ? 'On Windows, install ffmpeg (e.g. via Chocolatey: "choco install ffmpeg"), or install the "ffmpeg-static" npm package, or set the FFMPEG_PATH environment variable to the ffmpeg.exe location and restart the app.'
+        ? 'On Windows, install ffmpeg (for example via Chocolatey: "choco install ffmpeg", Scoop: "scoop install ffmpeg", or winget), or download a static build and add the folder containing ffmpeg.exe to your PATH. Alternatively set the FFMPEG_PATH environment variable to the full path to ffmpeg.exe (e.g. C:\\\\ffmpeg\\\\bin\\\\ffmpeg.exe) and restart your terminal/app so environment changes take effect.'
         : 'Install ffmpeg on your system and ensure the ffmpeg executable is available on your PATH, or install the "ffmpeg-static" npm package.';
       throw new Error('ffmpeg executable not found. fluent-ffmpeg requires the ffmpeg binary to convert audio. ' + winNote);
     }
