@@ -133,7 +133,7 @@ async function transcribeGoogle(filePath) {
     } else {
       // fluent-ffmpeg is present but we couldn't find an ffmpeg binary. Provide a helpful error.
       const winNote = process.platform === 'win32'
-        ? 'On Windows, install ffmpeg (for example via Chocolatey: "choco install ffmpeg", Scoop: "scoop install ffmpeg", or winget), or download a static build and add the folder containing ffmpeg.exe to your PATH. Alternatively set the FFMPEG_PATH environment variable to the full path to ffmpeg.exe (e.g. C:\\\\ffmpeg\\\\bin\\\\ffmpeg.exe) and restart your terminal/app so environment changes take effect.'
+        ? 'On Windows, install ffmpeg (for example via Chocolatey: "choco install ffmpeg", Scoop: "scoop install ffmpeg", or winget), or download a static build and add the folder containing ffmpeg.exe to your PATH. Alternatively set the FFMPEG_PATH environment variable to the full path to ffmpeg.exe (e.g. C:\\ffmpeg\\bin\\ffmpeg.exe) and restart your terminal/app so environment changes take effect.'
         : 'Install ffmpeg on your system and ensure the ffmpeg executable is available on your PATH, or install the "ffmpeg-static" npm package.';
       throw new Error('ffmpeg executable not found. fluent-ffmpeg requires the ffmpeg binary to convert audio. ' + winNote);
     }
@@ -145,6 +145,32 @@ async function transcribeGoogle(filePath) {
     } else {
       // Re-throw friendly errors (like missing ffmpeg binary) or other unexpected failures
       throw e;
+    }
+  }
+
+  // If we can convert, actually perform conversion to 16k mono PCM WAV and write to a temp file.
+  if (useConversion) {
+    try {
+      const tmpName = `asr-conv-${Date.now()}-${Math.random().toString(36).slice(2,8)}.wav`;
+      const tmpPath = path.join(os.tmpdir(), tmpName);
+      await new Promise((resolve, reject) => {
+        ffmpeg(filePath)
+          .outputOptions(['-ac 1', '-ar 16000', '-acodec pcm_s16le'])
+          .format('wav')
+          .on('error', (err) => {
+            // If conversion fails, log and continue using original file
+            console.warn('Audio conversion failed, will use original file:', err.message || err);
+            resolve();
+          })
+          .on('end', () => {
+            convertedPath = tmpPath;
+            resolve();
+          })
+          .save(tmpPath);
+      });
+    } catch (e) {
+      // If anything goes wrong, just fallback to original file
+      convertedPath = null;
     }
   }
 
