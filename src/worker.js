@@ -28,6 +28,66 @@ new QueueScheduler('media-jobs', { connection });
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR || 'uploads';
 
+// Configurable SRT grouping params (can be set via .env)
+const SRT_MAX_WORDS = parseInt(process.env.SRT_MAX_WORDS || '7', 10);
+const SRT_MAX_LINE_DURATION = parseFloat(process.env.SRT_MAX_LINE_DURATION || '4.0');
+const SRT_MAX_CHARS = parseInt(process.env.SRT_MAX_CHARS || '80', 10);
+
+// Normalize/parse various ASR response formats into a common shape: { text: string, segments: [{text,start,end,words?}] }
+function normalizeAsrResponse(asrResp) {
+  if (!asrResp) return { text: '', segments: [] };
+  if (typeof asrResp === 'string') return { text: asrResp, segments: [] };
+
+  // OpenAI verbose_json or similar
+  if (typeof asrResp.text === 'string' && Array.isArray(asrResp.segments)) {
+    return { text: asrResp.text, segments: asrResp.segments.map(s => ({ text: s.text || '', start: Number(s.start || 0), end: Number(s.end || 0), words: s.words })) };
+  }
+
+  // Generic segments array (whisper.cpp, whispr-derived formats)
+  if (Array.isArray(asrResp.segments)) {
+    const segments = asrResp.segments.map(s => {
+      const text = s.text || s.transcript || '';
+      const start = Number(s.start || s.begin || s.seek || 0);
+      const end = Number(s.end || (s.start && s.duration ? Number(s.start) + Number(s.duration) : 0));
+      const words = Array.isArray(s.words) ? s.words.map(w => ({ word: w.word || w.text || w.token, start: Number(w.start || w.startTime || 0), end: Number(w.end || w.endTime || 0) })) : undefined;
+      return { text, start, end, words };
+    });
+    const text = (asrResp.text && typeof asrResp.text === 'string') ? asrResp.text : segments.map(s => s.text).join(' ').trim();
+    return { text, segments };
+  }
+
+  // Google Speech-to-Text style responses
+  if (Array.isArray(asrResp.results)) {
+    let text = '';
+    const words = [];
+    asrResp.results.forEach(result => {
+      if (Array.isArray(result.alternatives) && result.alternatives[0]) {
+        const alt = result.alternatives[0];
+        if (alt.transcript) text += (text ? ' ' : '') + alt.transcript;
+        if (Array.isArray(alt.words)) {
+          alt.words.forEach(w => {
+            // Google returns startTime/endTime as objects {seconds,nanos}
+            let start = 0, end = 0;
+            if (w.startTime && (w.startTime.seconds || w.startTime.nanos)) {
+              start = Number(w.startTime.seconds || 0) + Number(w.startTime.nanos || 0) / 1e9;
+            } else if (typeof w.startTime === 'number') start = w.startTime;
+            if (w.endTime && (w.endTime.seconds || w.endTime.nanos)) {
+              end = Number(w.endTime.seconds || 0) + Number(w.endTime.nanos || 0) / 1e9;
+            } else if (typeof w.endTime === 'number') end = w.endTime;
+            words.push({ word: w.word, start, end });
+          });
+        }
+      }
+    });
+    // turn words into simple segments (one-word segments) so downstream code can use timing
+    const segments = words.map(w => ({ text: w.word, start: w.start, end: w.end, words: [{ word: w.word, start: w.start, end: w.end }] }));
+    return { text: text.trim(), segments };
+  }
+
+  // Unknown shape -> best-effort stringify
+  try { return { text: String(asrResp), segments: [] }; } catch (e) { return { text: '', segments: [] }; }
+}
+
 const worker = new Worker('media-jobs', async (job) => {
   if (job.name !== 'process-video') return;
   const { id, path: filePath, originalname } = job.data;
@@ -81,15 +141,11 @@ const worker = new Worker('media-jobs', async (job) => {
   let asrStructured = null; // populated when ASR returns verbose_json with timing
   try {
     const asrResp = await transcribe(audioForAsr);
-    if (asrResp && typeof asrResp === 'object') {
-      asrStructured = asrResp;
-      // prefer top-level text if present, otherwise join segment texts
-      transcriptText = asrResp.text || (Array.isArray(asrResp.segments) ? asrResp.segments.map(s => s.text).join(' ').trim() : '');
-      // write structured JSON for debugging/inspection
-      try { fs.writeFileSync(outTranscript + '.json', JSON.stringify(asrResp, null, 2), 'utf8'); } catch (e) {}
-    } else {
-      transcriptText = asrResp;
-    }
+    const norm = normalizeAsrResponse(asrResp);
+    asrStructured = norm; // normalized structure
+    transcriptText = norm.text || (Array.isArray(norm.segments) ? norm.segments.map(s => s.text).join(' ').trim() : '');
+    // write structured JSON for debugging/inspection
+    try { fs.writeFileSync(outTranscript + '.json', JSON.stringify(norm, null, 2), 'utf8'); } catch (e) {}
   } catch (err) {
     transcriptText = `ASR error: ${err.message}`;
   }
@@ -218,9 +274,10 @@ const worker = new Worker('media-jobs', async (job) => {
                 words.push(w);
               });
             });
-            // group words into lines (~7 words or max duration 4s)
-            const maxWords = 7;
-            const maxDur = 4.0;
+            // group words into lines according to configurable rules
+            const maxWords = SRT_MAX_WORDS;
+            const maxDur = SRT_MAX_LINE_DURATION;
+            const maxChars = SRT_MAX_CHARS;
             let i = 0;
             let idx = 1;
             while (i < words.length) {
@@ -228,12 +285,18 @@ const worker = new Worker('media-jobs', async (job) => {
               let j = i;
               let end = Number(words[i].end) || start;
               const parts = [];
+              let chars = 0;
               while (j < words.length && parts.length < maxWords) {
                 const w = words[j];
                 const wStart = Number(w.start) || end;
                 const wEnd = Number(w.end) || wStart;
+                // if adding this word exceeds maxDur and we already have at least one word, break
                 if ((wEnd - start) > maxDur && parts.length > 0) break;
+                // if adding this word exceeds maxChars and we already have at least one word, break
+                const wordLen = String(w.word || '').length + 1;
+                if ((chars + wordLen) > maxChars && parts.length > 0) break;
                 parts.push(w.word);
+                chars += wordLen;
                 end = wEnd;
                 j++;
               }

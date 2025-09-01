@@ -33,9 +33,25 @@ app.post('/upload', upload.single('file'), async (req, res) => {
   const jobId = uuidv4();
   const filePath = path.join(UPLOAD_DIR, req.file.filename);
   // read optional merge options from the multipart form
-  const mergeMode = req.body && req.body.mergeMode ? req.body.mergeMode : undefined;
-  const burnSubtitles = req.body && typeof req.body.burnSubtitles !== 'undefined' ? req.body.burnSubtitles : undefined;
-  const enhance = req.body && typeof req.body.enhance !== 'undefined' ? req.body.enhance : undefined;
+  const mergeModeRaw = req.body && req.body.mergeMode ? req.body.mergeMode : undefined;
+  const burnSubtitlesRaw = req.body && typeof req.body.burnSubtitles !== 'undefined' ? req.body.burnSubtitles : undefined;
+  const enhanceRaw = req.body && typeof req.body.enhance !== 'undefined' ? req.body.enhance : undefined;
+
+  // normalize/validate inputs
+  let mergeMode;
+  if (typeof mergeModeRaw !== 'undefined') {
+    const m = String(mergeModeRaw).toLowerCase();
+    if (m !== 'replace' && m !== 'mix') return res.status(400).json({ error: 'mergeMode must be "replace" or "mix"' });
+    mergeMode = m;
+  }
+  let burnSubtitles = undefined;
+  if (typeof burnSubtitlesRaw !== 'undefined') {
+    burnSubtitles = (String(burnSubtitlesRaw).toLowerCase() === 'true');
+  }
+  let enhance = undefined;
+  if (typeof enhanceRaw !== 'undefined') {
+    enhance = (String(enhanceRaw).toLowerCase() === 'true');
+  }
 
   const jobData = { id: jobId, path: filePath, originalname: req.file.originalname };
   if (mergeMode) jobData.mergeMode = mergeMode;
